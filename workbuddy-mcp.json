@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "mysql-mcp": {
+      "command": "/Users/sundonglai/ai/vscode/study/PYTHON/mysql-mcp/.venv/bin/python",
+      "args": [
+        "-m",
+        "mysql_mcp"
+      ],
+      "env": {
+        "MYSQL_HOST": "localhost",
+        "MYSQL_PORT": "3306",
+        "MYSQL_USER": "root",
+        "MYSQL_PASSWORD": "your_password",
+        "MYSQL_DATABASE": "your_database",
+        "MYSQL_CHARSET": "utf8mb4"
+      }
+    }
+  }
+}

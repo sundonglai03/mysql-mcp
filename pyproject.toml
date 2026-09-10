@@ -1,0 +1,20 @@
+[project]
+name = "mysql-mcp"
+version = "0.1.0"
+description = "MySQL MCP server for LLM tools and automation"
+readme = "README.md"
+authors = [
+    { name = "sundonglai03", email = "sundonglai03@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=2.0.0",
+    "mysql-connector-python>=9.0.0",
+]
+
+[project.scripts]
+mysql-mcp = "mysql_mcp.server:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
