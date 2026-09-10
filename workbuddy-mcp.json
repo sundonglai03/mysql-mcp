@@ -1,8 +1,12 @@
 {
   "mcpServers": {
     "mysql-mcp": {
-      "command": "/Users/sundonglai/ai/vscode/study/PYTHON/mysql-mcp/.venv/bin/python",
+      "command": "uv",
       "args": [
+        "run",
+        "--project",
+        "/Users/sundonglai/ai/vscode/study/PYTHON/mysql-mcp",
+        "python",
         "-m",
         "mysql_mcp"
       ],

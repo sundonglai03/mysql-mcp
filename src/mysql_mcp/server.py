@@ -70,7 +70,8 @@ def list_tables() -> list[str]:
     try:
         cursor = conn.cursor()
         cursor.execute("SHOW TABLES")
-        return [row[0] for row in cursor.fetchall()]
+        rows = cursor.fetchall()
+        return [str(row[0]) if isinstance(row, (tuple, list)) else str(row) for row in rows]
     finally:
         conn.close()
 
@@ -81,7 +82,8 @@ def get_databases() -> list[str]:
     try:
         cursor = conn.cursor()
         cursor.execute("SHOW DATABASES")
-        return [row[0] for row in cursor.fetchall()]
+        rows = cursor.fetchall()
+        return [str(row[0]) if isinstance(row, (tuple, list)) else str(row) for row in rows]
     finally:
         conn.close()
 
@@ -104,9 +106,11 @@ def fetch_table(table_name: str, limit: int = 50, where: str | None = None, orde
         cursor = conn.cursor(dictionary=True)
         cursor.execute(sql, params)
         rows = cursor.fetchall()
+        first_row = rows[0] if rows else {}
+        columns = list(first_row.keys()) if isinstance(first_row, dict) else []
         return {
             "table": safe_table,
-            "columns": list(rows[0].keys()) if rows else [],
+            "columns": columns,
             "rows": rows,
             "row_count": len(rows),
         }
@@ -127,7 +131,13 @@ def count_rows(table_name: str, where: str | None = None) -> dict[str, Any]:
         cursor = conn.cursor(dictionary=True)
         cursor.execute(sql, params)
         result = cursor.fetchone()
-        return {"table": safe_table, "total": result["total"] if result else 0}
+        if isinstance(result, dict):
+            total = result.get("total", 0)
+        elif isinstance(result, (tuple, list)):
+            total = result[0] if result else 0
+        else:
+            total = 0
+        return {"table": safe_table, "total": total}
     finally:
         conn.close()
 
@@ -227,7 +237,8 @@ def describe_table(table_name: str) -> list[dict[str, Any]]:
             """,
             (conn.database, table_name),
         )
-        return cursor.fetchall()
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows if isinstance(row, dict)]
     finally:
         conn.close()
 

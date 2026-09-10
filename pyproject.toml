@@ -3,8 +3,17 @@ name = "mysql-mcp"
 version = "0.1.0"
 description = "MySQL MCP server for LLM tools and automation"
 readme = "README.md"
+license = { text = "MIT" }
 authors = [
     { name = "sundonglai03", email = "sundonglai03@gmail.com" }
+]
+keywords = ["mysql", "mcp", "database", "ai", "llm"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
 ]
 requires-python = ">=3.11"
 dependencies = [
@@ -12,8 +21,19 @@ dependencies = [
     "mysql-connector-python>=9.0.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6.0",
+]
+
 [project.scripts]
 mysql-mcp = "mysql_mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/sundonglai03/mysql-mcp"
+Repository = "https://github.com/sundonglai03/mysql-mcp"
+Issues = "https://github.com/sundonglai03/mysql-mcp/issues"
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]

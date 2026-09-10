@@ -32,7 +32,15 @@ mysql-mcp/
 
 ## 安装
 
-在项目根目录执行：
+推荐直接使用 uv：
+
+```bash
+cd /Users/sundonglai/ai/vscode/study/PYTHON/mysql-mcp
+uv sync
+uv run python -m mysql_mcp
+```
+
+如果你想用传统 venv，也可以：
 
 ```bash
 python3 -m venv .venv
@@ -61,13 +69,19 @@ export MYSQL_CHARSET=utf8mb4
 直接运行：
 
 ```bash
-python -m mysql_mcp
+uv run python -m mysql_mcp
 ```
 
 或者：
 
 ```bash
-mysql-mcp
+uv run mysql-mcp
+```
+
+如果你已经在项目目录里并且环境已同步，也可以直接运行：
+
+```bash
+python -m mysql_mcp
 ```
 
 ## WorkBuddy 配置示例
