@@ -1,12 +1,31 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtualenv
+.venv/
+
+# Test / lint caches
 .pytest_cache/
+.pytest-tmp/
 .mypy_cache/
 .ruff_cache/
-.venv
+.coverage
+htmlcov/
+
+# Editors / OS
 .idea/
 .vscode/
 .DS_Store
+
+# Secrets
+# Connection profiles live in ~/.mysql-mcp/ by default; ignore a stray local copy
+# so credentials are never committed.
+.env
+connections.json
+
+# Logs
+*.log

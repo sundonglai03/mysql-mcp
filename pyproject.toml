@@ -3,7 +3,8 @@ name = "mysql-mcp"
 version = "0.1.0"
 description = "MySQL MCP server for LLM tools and automation"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "sundonglai03", email = "sundonglai03@gmail.com" }
 ]
@@ -12,13 +13,13 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=2.0.0",
     "mysql-connector-python>=9.0.0",
+    "pydantic>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -38,3 +39,11 @@ Issues = "https://github.com/sundonglai03/mysql-mcp/issues"
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+
+[tool.ruff.format]
+# README 里的示例刻意写得紧凑（人扫一眼就能看懂），不让格式器展开成多行
+exclude = ["*.md"]

@@ -4,8 +4,8 @@ requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
     "python_full_version >= '3.14' and sys_platform != 'win32'",
-    "python_full_version < '3.14' and sys_platform == 'win32'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
+    "python_full_version < '3.14' and sys_platform == 'win32'",
     "(python_full_version < '3.12' and sys_platform == 'emscripten') or (python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32')",
 ]
 
@@ -378,6 +378,7 @@ source = { editable = "." }
 dependencies = [
     { name = "mcp" },
     { name = "mysql-connector-python" },
+    { name = "pydantic" },
 ]
 
 [package.optional-dependencies]
@@ -390,6 +391,7 @@ dev = [
 requires-dist = [
     { name = "mcp", specifier = ">=2.0.0" },
     { name = "mysql-connector-python", specifier = ">=9.0.0" },
+    { name = "pydantic", specifier = ">=2.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6.0" },
 ]
