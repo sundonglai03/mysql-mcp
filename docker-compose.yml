@@ -1,6 +1,8 @@
 services:
   mysql-mcp:
     build: .
+    image: sundonglai/mysql-mcp:latest
+    container_name: mysql-mcp
     restart: unless-stopped
     ports:
       - "127.0.0.1:8000:8000"

@@ -43,7 +43,8 @@ docker compose logs -f mysql-mcp
 docker compose down
 ```
 
-默认监听 `127.0.0.1:8000`，连接档案保存在 Docker volume `mysql-mcp-data`。
+镜像名为 `sundonglai/mysql-mcp:latest`，容器名为 `mysql-mcp`。默认监听
+`127.0.0.1:8000`，连接档案保存在 Docker volume `mysql-mcp-data`。
 
 ## 连接数据库
 
