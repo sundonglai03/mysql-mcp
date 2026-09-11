@@ -10,6 +10,8 @@ a ``connection`` name that resolves against the profiles stored by
 name a saved profile or carry the inline ``credentials`` to create one.
 """
 
+import argparse
+import os
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -22,7 +24,9 @@ from mysql.connector import Error as MySQLError
 from pydantic import Field
 
 from . import connections
+from .client import MySQLClient
 from .connections import ProfileConflict, ProfileError
+from .http_auth import BearerTokenMiddleware
 
 mcp = MCPServer("mysql-mcp")
 
@@ -271,7 +275,7 @@ def get_connection_config(connection: ConnectionName = None) -> dict[str, Any]:
 
 def _dial(config: dict[str, Any]):
     """Single seam through which every connection is opened (tests patch this)."""
-    return mysql.connector.connect(**config)
+    return MySQLClient(config).connect()
 
 
 def get_connection(connection: ConnectionName = None):
@@ -313,10 +317,7 @@ def _connection(
 
 
 def _close_quietly(conn: Any) -> None:
-    try:
-        conn.close()
-    except MySQLError:
-        pass
+    MySQLClient._close_raw(conn)
 
 
 def _connection_fields(info: ConnectionInfo) -> dict[str, Any]:
@@ -357,16 +358,7 @@ def _apply_query_timeout(conn: Any) -> None:
     MySQL only; MariaDB uses a different variable, so failures are swallowed and
     the connection is used as-is.
     """
-    cursor = conn.cursor()
-    try:
-        cursor.execute(f"SET SESSION MAX_EXECUTION_TIME = {DEFAULT_QUERY_TIMEOUT_MS}")
-    except MySQLError:
-        pass
-    finally:
-        try:
-            cursor.close()
-        except MySQLError:
-            pass
+    MySQLClient.apply_query_timeout_to(conn, DEFAULT_QUERY_TIMEOUT_MS)
 
 
 @contextmanager
@@ -1329,7 +1321,7 @@ def list_connections() -> dict[str, Any]:
         "lower that profile's mutation cap. Saving over an existing name is only allowed "
         "when it addresses the same host/port/user, unless overwrite=true is passed "
         "explicitly. Unlike the inline `credentials` argument of the query tools, this does "
-        "NOT test the connection first."
+        "NOT test the connection first unless verify=true is passed."
     )
 )
 def save_connection(
@@ -1344,27 +1336,31 @@ def save_connection(
     max_affected_rows: int | None = None,
     description: str | None = None,
     overwrite: bool = False,
+    verify: bool = False,
 ) -> dict[str, Any]:
     try:
-        profile = connections.save_profile(
-            name,
-            {
-                "host": host,
-                "port": port,
-                "user": user,
-                "password": password,
-                "database": database,
-                "charset": charset,
-                "read_only": read_only,
-                "max_affected_rows": max_affected_rows,
-                "description": description,
-            },
-            overwrite=overwrite,
-        )
+        fields = {
+            "host": host,
+            "port": port,
+            "user": user,
+            "password": password,
+            "database": database,
+            "charset": charset,
+            "read_only": read_only,
+            "max_affected_rows": max_affected_rows,
+            "description": description,
+        }
+        candidate = connections.normalize_profile(name, {k: v for k, v in fields.items() if v is not None})
+        if verify:
+            conn = _dial(_profile_connection_config(candidate))
+            _close_quietly(conn)
+        profile = connections.save_profile(name, fields, overwrite=overwrite)
     except ProfileConflict as exc:
         return _error_result(str(exc), code="CONNECTION_CONFLICT")
     except ProfileError as exc:
         return _error_result(str(exc), code="CONNECTION_INVALID")
+    except MySQLError as exc:
+        return _error_result(str(exc), code="CONNECTION_FAILED")
     except OSError as exc:
         return _error_result(
             f"Failed to write {connections.connections_file()}: {exc}",
@@ -1405,8 +1401,91 @@ def delete_connection(name: str) -> dict[str, Any]:
     }
 
 
-def main() -> None:
-    mcp.run(transport="stdio")
+def _streamable_http_path(value: str) -> str:
+    """Validate the endpoint path accepted by the MCP SDK."""
+    if not value.startswith("/"):
+        raise argparse.ArgumentTypeError("must start with '/'")
+    return value
+
+
+def _port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("must be between 1 and 65535")
+    return port
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Start the server over stdio (default) or Streamable HTTP."""
+    parser = argparse.ArgumentParser(description="MySQL MCP server")
+    parser.add_argument(
+        "--transport",
+        choices=("stdio", "streamable-http"),
+        default="stdio",
+        help="MCP transport to use (default: stdio)",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="HTTP bind host")
+    parser.add_argument("--port", type=_port, default=8000, help="HTTP bind port")
+    parser.add_argument(
+        "--path",
+        type=_streamable_http_path,
+        default="/mcp",
+        help="Streamable HTTP endpoint path",
+    )
+    parser.add_argument(
+        "--json-response",
+        action="store_true",
+        help="return JSON responses instead of streaming SSE responses",
+    )
+    parser.add_argument(
+        "--stateless-http",
+        action="store_true",
+        help="do not retain MCP sessions on the server",
+    )
+    parser.add_argument(
+        "--auth-token",
+        default=os.getenv("MYSQL_MCP_AUTH_TOKEN"),
+        help="optional Bearer token; can also be set with MYSQL_MCP_AUTH_TOKEN",
+    )
+    args = parser.parse_args(argv)
+
+    if args.transport == "stdio":
+        mcp.run(transport="stdio")
+        return
+
+    if not args.auth_token:
+        mcp.run(
+            transport="streamable-http",
+            host=args.host,
+            port=args.port,
+            streamable_http_path=args.path,
+            json_response=args.json_response,
+            stateless_http=args.stateless_http,
+        )
+        return
+
+    import anyio
+    import uvicorn
+
+    async def serve() -> None:
+        app = mcp.streamable_http_app(
+            streamable_http_path=args.path,
+            json_response=args.json_response,
+            stateless_http=args.stateless_http,
+            host=args.host,
+        )
+        config = uvicorn.Config(
+            BearerTokenMiddleware(app, args.auth_token),
+            host=args.host,
+            port=args.port,
+            log_level=mcp.settings.log_level.lower(),
+        )
+        await uvicorn.Server(config).serve()
+
+    anyio.run(serve)
 
 
 if __name__ == "__main__":

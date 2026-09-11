@@ -26,6 +26,8 @@ htmlcov/
 # so credentials are never committed.
 .env
 connections.json
+work/
+data/
 
 # Logs
 *.log

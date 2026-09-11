@@ -29,7 +29,7 @@ dev = [
 ]
 
 [project.scripts]
-mysql-mcp = "mysql_mcp.server:main"
+mysql-mcp = "mysql_mcp.mcp_server:main"
 
 [project.urls]
 Homepage = "https://github.com/sundonglai03/mysql-mcp"

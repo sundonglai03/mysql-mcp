@@ -227,11 +227,8 @@ def _read_raw() -> dict[str, Any]:
 
 def _write_raw(data: dict[str, Any]) -> None:
     path = connections_file()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(path.parent, 0o700)
-    except OSError:
-        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
 
     payload = json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
     handle_fd, tmp_name = tempfile.mkstemp(
