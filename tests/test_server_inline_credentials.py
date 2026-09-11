@@ -62,6 +62,45 @@ def test_a_successful_connect_saves_the_profile(fake_db, isolated_connections_fi
     assert payload["lab"]["database"] == "labdb"
 
 
+def test_remember_false_runs_once_without_persisting_credentials(
+    fake_db, isolated_connections_file
+):
+    fake_db([(matches("SHOW TABLES"), [])])
+
+    result = server.list_tables(
+        connection="one-shot",
+        credentials={
+            "host": "10.0.0.5",
+            "user": "root",
+            "password": "s3cret",
+            "database": "labdb",
+        },
+        remember=False,
+    )
+
+    assert result == []
+    assert not isolated_connections_file.exists()
+
+
+def test_one_shot_credentials_do_not_need_a_connection_name(
+    fake_db, isolated_connections_file
+):
+    fake_db([(matches("SHOW TABLES"), [])])
+
+    result = server.list_tables(
+        credentials={
+            "host": "10.0.0.5",
+            "user": "root",
+            "password": "s3cret",
+            "database": "labdb",
+        },
+        remember=False,
+    )
+
+    assert result == []
+    assert not isolated_connections_file.exists()
+
+
 def test_the_saved_profile_is_reused_without_credentials(
     fake_db, isolated_connections_file
 ):

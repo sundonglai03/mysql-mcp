@@ -44,17 +44,14 @@ docker compose down
 ```
 
 镜像名为 `sundonglai/mysql-mcp:latest`，容器名为 `mysql-mcp`。默认监听
-`127.0.0.1:8000`，连接档案保存在 Docker volume `mysql-mcp-data`。
+`127.0.0.1:8000`。服务不保存连接档案，数据库凭据由每次调用提供。
 
 ## 连接数据库
 
-连接信息默认保存在 `~/.mysql-mcp/connections.json`，也可以通过
-`MYSQL_CONNECTIONS_FILE` 指定路径。密码不会出现在工具返回值中，文件权限为 `0600`。
-
-首次使用可以直接带凭据：
+每次业务调用都直接传入数据库凭据：
 
 ```text
-list_tables(connection="prod", credentials={
+list_tables(credentials={
   "host": "db.example.com",
   "user": "reader",
   "password": "...",
@@ -62,20 +59,7 @@ list_tables(connection="prod", credentials={
 })
 ```
 
-连接成功后会保存为 `prod`，后续只需要：
-
-```text
-list_tables(connection="prod")
-```
-
-也可以显式保存：
-
-```text
-save_connection(name="prod", host="db.example.com", user="reader",
-                password="...", database="app", read_only=true)
-```
-
-需要在保存前测试凭据时传 `verify=true`；验证失败不会写入档案。
+服务只在内存中使用凭据，连接关闭后不会保存密码。
 
 ## 工具
 
@@ -89,7 +73,6 @@ save_connection(name="prod", host="db.example.com", user="reader",
 | `count_rows` | 统计行数 |
 | `execute_query` | 执行单条 SQL，默认只读 |
 | `insert_row` / `update_rows` / `delete_rows` | 数据变更 |
-| `list_connections` / `save_connection` / `delete_connection` | 管理连接档案 |
 
 ## 安全边界
 
@@ -108,7 +91,7 @@ src/mysql_mcp/
 ├── mcp_server.py   # MCP transport 入口
 ├── server.py       # 工具和 SQL 策略
 ├── client.py       # MySQL 连接生命周期
-└── connections.py  # 连接档案和凭据持久化
+└── connections.py  # 连接参数校验和 TLS 配置
 ```
 
 ## 开发
@@ -120,7 +103,7 @@ src/mysql_mcp/
 docker compose config
 ```
 
-不要提交 `.venv/`、连接档案、Docker 数据卷或任何密码文件。
+不要提交 `.venv/`、Docker 数据卷或任何密码文件。
 
 ## License
 

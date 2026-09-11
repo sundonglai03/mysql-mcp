@@ -6,12 +6,7 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8000:8000"
-    volumes:
-      - mysql-mcp-data:/data
     environment:
       - MYSQL_MCP_AUTH_TOKEN
     # The default binds only to localhost on the host. Put an authenticated
     # TLS reverse proxy in front if another machine needs to reach this service.
-
-volumes:
-  mysql-mcp-data:

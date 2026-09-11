@@ -5,9 +5,8 @@ cap on result-set size, structured (never raw) WHERE clauses, a cap on how many
 rows a single mutation may touch, connection/statement timeouts and TLS support.
 
 Several databases are supported without restarting the process: every tool takes
-a ``connection`` name that resolves against the profiles stored by
-:mod:`mysql_mcp.connections`. There is no implicit default — a call must either
-name a saved profile or carry the inline ``credentials`` to create one.
+the complete inline ``credentials`` for that operation. Credentials are never
+persisted or looked up by the MCP server.
 """
 
 import argparse
@@ -82,19 +81,15 @@ _WHERE_DOC = (
 )
 
 _CONNECTION_DOC = (
-    "`connection` selects a saved profile by name; call list_connections to see the names. "
-    "For a database that has no profile yet, pass its login details in `credentials` "
-    "together with `connection` (the name to store them under): once the connection "
-    "succeeds they are written to the connections file, and every later call needs only "
-    "`connection`."
+    "Pass the complete database login in `credentials` on every operation. "
+    "The server uses it only for this call and never reads or writes saved profiles."
 )
 
 ConnectionName = Annotated[
     str | None,
     Field(
         description=(
-            "Saved connection profile name, as returned by list_connections. Required "
-            "unless the call carries inline `credentials`."
+            "Optional label for this one-shot call; it is not persisted or looked up."
         )
     ),
 ]
@@ -103,13 +98,11 @@ Credentials = Annotated[
     dict[str, Any] | None,
     Field(
         description=(
-            "Login details for a connection that is not saved yet, used together with "
-            "`connection` (the name they get saved under). Shape: "
+            "Complete login details for this operation. Shape: "
             '{"host": "10.0.0.5", "port": 3306, "user": "root", "password": "...", '
             '"database": "mydb", "charset": "utf8mb4"} — `host` is the only required key. '
-            "On a successful connect they are written to the connections file, so later "
-            "calls only need `connection`. Refused if the name already points at a "
-            "different host, and never loosens read_only/max_affected_rows."
+            "Credentials are discarded after the operation and never loosen "
+            "read_only/max_affected_rows."
         )
     ),
 ]
@@ -126,8 +119,6 @@ class ConnectionInfo:
     max_affected_rows: int | None = None
     database: str | None = None
     # Set for inline credentials: the profile to persist once dialling succeeded.
-    pending: dict[str, Any] | None = field(default=None, repr=False)
-    remembered: bool = False
 
 
 class ReadOnlyConnectionError(ValueError):
@@ -158,18 +149,6 @@ def _profile_connection_config(profile: dict[str, Any]) -> dict[str, Any]:
         config["database"] = profile["database"]
     config.update(_profile_ssl_options(profile))
     return config
-
-
-def _saved_name_hint() -> str:
-    try:
-        names = [
-            entry["name"] for entry in connections.list_profiles() if entry["valid"]
-        ]
-    except ProfileError:
-        names = []
-    if not names:
-        return "No connections are saved yet; create one with save_connection."
-    return f"Available connections: {', '.join(names)}."
 
 
 def resolve_connection(connection: ConnectionName = None) -> ConnectionInfo:
@@ -221,40 +200,19 @@ def _inline_fields(credentials: Any) -> dict[str, Any]:
 
 
 def resolve_request(
-    connection: ConnectionName = None, credentials: Credentials = None
+    connection: ConnectionName = None,
+    credentials: Credentials = None,
 ) -> ConnectionInfo:
-    """Resolve one tool call, remembering inline credentials once they work.
+    """Resolve one stateless tool call from credentials supplied by the caller.
 
-    Without ``credentials`` this is plain :func:`resolve_connection`. With them, the
-    name must be given — that name is where the details get stored — and the profile
-    is marked ``pending`` so :func:`_connection` can save it after a successful dial.
+    Credentials are required for every call. The server never reads or writes a
+    saved connection profile for operational tools.
     """
     if credentials is None:
-        return resolve_connection(connection)
-    if connection is None:
-        raise ProfileError(
-            "credentials need connection=<name>: that name is what they get saved under, "
-            "so later calls can reuse them without repeating the password. Use "
-            "save_connection instead if you only want to store them without dialling."
-        )
-
-    clean = connections.validate_name(connection)
+        raise ProfileError("credentials are required for every database operation")
     fields = _inline_fields(credentials)
-    stored = connections.find_profile(clean)
-
-    profile = connections.normalize_profile(
-        clean,
-        {**(stored or {}), **{k: v for k, v in fields.items() if k in _OVERLAY_KEYS}},
-    )
-    if stored is not None and connections.identity(stored) != connections.identity(
-        profile
-    ):
-        raise ProfileConflict(
-            f"Connection {clean!r} already points at "
-            f"{connections.describe_identity(stored)}; refusing to repoint it at "
-            f"{connections.describe_identity(profile)}. Use save_connection with "
-            "overwrite=true if that is really intended, or pick another name."
-        )
+    clean = connections.validate_name(connection) if connection else "one-shot"
+    profile = connections.normalize_profile(clean, fields)
 
     config = _profile_connection_config(profile)
     config["connection_timeout"] = DEFAULT_CONNECT_TIMEOUT
@@ -265,7 +223,6 @@ def resolve_request(
         read_only=bool(profile.get("read_only", False)),
         max_affected_rows=profile.get("max_affected_rows"),
         database=config.get("database"),
-        pending=profile,
     )
 
 
@@ -292,23 +249,13 @@ def _connection(
 ) -> Iterator[tuple[Any, ConnectionInfo]]:
     """Resolve the profile, refuse writes on a read-only one, then dial.
 
-    The policy check deliberately runs before connecting, so a read-only profile
-    reports ``CONNECTION_READ_ONLY`` even when the host is unreachable. Inline
-    credentials are written to the connections file only after the dial succeeded,
-    which doubles as the credential check ``save_connection`` alone cannot do.
+    The policy check deliberately runs before connecting, so a read-only request
+    reports ``CONNECTION_READ_ONLY`` even when the host is unreachable.
     """
     info = resolve_request(connection, credentials)
     if write_operation is not None:
         _assert_writable(info, write_operation)
     conn = _dial(info.config)
-
-    if info.pending is not None:
-        try:
-            connections.save_profile(info.name, info.pending)
-        except ProfileError:
-            _close_quietly(conn)
-            raise
-        info = replace(info, pending=None, remembered=True, source="inline")
 
     try:
         yield conn, info
@@ -323,8 +270,6 @@ def _close_quietly(conn: Any) -> None:
 def _connection_fields(info: ConnectionInfo) -> dict[str, Any]:
     """Connection keys every tool reports, naming the profile that served the call."""
     fields: dict[str, Any] = {"connection": info.name}
-    if info.remembered:
-        fields["connection_saved"] = str(connections.connections_file())
     return fields
 
 
@@ -368,7 +313,9 @@ def _read_connection(
     *,
     write_operation: str | None = None,
 ) -> Iterator[tuple[Any, ConnectionInfo]]:
-    with _connection(connection, credentials, write_operation=write_operation) as (
+    with _connection(
+        connection, credentials, write_operation=write_operation
+    ) as (
         conn,
         info,
     ):
@@ -735,7 +682,8 @@ def _mutation_cap_error(table: str, matched: int, cap: int) -> dict[str, Any]:
     )
 )
 def health_check(
-    connection: ConnectionName = None, credentials: Credentials = None
+    connection: ConnectionName = None,
+    credentials: Credentials = None,
 ) -> dict[str, Any]:
     try:
         with _read_connection(connection, credentials) as (conn, info):
@@ -768,7 +716,8 @@ def health_check(
     )
 )
 def list_tables(
-    connection: ConnectionName = None, credentials: Credentials = None
+    connection: ConnectionName = None,
+    credentials: Credentials = None,
 ) -> list[str] | dict[str, Any]:
     try:
         with _connection(connection, credentials) as (conn, info):
@@ -797,7 +746,8 @@ def list_tables(
     )
 )
 def get_databases(
-    connection: ConnectionName = None, credentials: Credentials = None
+    connection: ConnectionName = None,
+    credentials: Credentials = None,
 ) -> list[str] | dict[str, Any]:
     try:
         with _connection(connection, credentials) as (conn, _info):
@@ -966,7 +916,9 @@ def insert_row(
         column_sql = ", ".join(f"`{column}`" for column in columns)
         sql = f"INSERT INTO `{safe_table}` ({column_sql}) VALUES ({placeholders})"
 
-        with _connection(connection, credentials, write_operation="insert_row") as (
+        with _connection(
+            connection, credentials, write_operation="insert_row"
+        ) as (
             conn,
             info,
         ):
@@ -1030,7 +982,9 @@ def update_rows(
         params = list(updates.values()) + where_bindings
         sql = f"UPDATE `{safe_table}` SET {set_clause} WHERE {where_clause}"
 
-        with _connection(connection, credentials, write_operation="update_rows") as (
+        with _connection(
+            connection, credentials, write_operation="update_rows"
+        ) as (
             conn,
             info,
         ):
@@ -1091,7 +1045,9 @@ def delete_rows(
         where_clause, where_bindings = _build_where_clause(where, where_params)
         sql = f"DELETE FROM `{safe_table}` WHERE {where_clause}"
 
-        with _connection(connection, credentials, write_operation="delete_rows") as (
+        with _connection(
+            connection, credentials, write_operation="delete_rows"
+        ) as (
             conn,
             info,
         ):
@@ -1210,7 +1166,9 @@ def execute_query(
 
         write_operation = None if read_only else "execute_query(read_only=false)"
         with _read_connection(
-            connection, credentials, write_operation=write_operation
+            connection,
+            credentials,
+            write_operation=write_operation,
         ) as (
             conn,
             info,
@@ -1276,129 +1234,6 @@ def execute_sql(
         connection=connection,
         credentials=credentials,
     )
-
-
-@mcp.tool(
-    description=(
-        "List the saved connection profiles this server can dial. Passwords are never "
-        "returned. Use the returned `name` as the `connection` argument of the other tools."
-    )
-)
-def list_connections() -> dict[str, Any]:
-    try:
-        saved = connections.list_profiles()
-    except ProfileError as exc:
-        return _error_result(str(exc), code="CONNECTION_ERROR")
-
-    names = [entry["name"] for entry in saved]
-    if names:
-        usage = (
-            f"Pass e.g. connection={names[0]!r} to any other tool. There is no "
-            "implicit default connection: for a database that has no profile yet, "
-            "pass connection=<name> together with credentials and it is saved on "
-            "the first successful dial."
-        )
-    else:
-        usage = (
-            "No connections are saved yet. There is no implicit default connection: "
-            "pass connection=<name> together with credentials to create one, and it "
-            "is saved on the first successful dial."
-        )
-
-    return {
-        "ok": True,
-        "connections_file": str(connections.connections_file()),
-        "connections": saved,
-        "usage": usage,
-    }
-
-
-@mcp.tool(
-    description=(
-        "Create or update a saved connection profile so the other tools can address another "
-        "database by name. The entry is written to the connections file with mode 600. Set "
-        "read_only=true to make the profile refuse every write, and max_affected_rows to "
-        "lower that profile's mutation cap. Saving over an existing name is only allowed "
-        "when it addresses the same host/port/user, unless overwrite=true is passed "
-        "explicitly. Unlike the inline `credentials` argument of the query tools, this does "
-        "NOT test the connection first unless verify=true is passed."
-    )
-)
-def save_connection(
-    name: str,
-    host: str,
-    port: int = connections.DEFAULT_PORT,
-    user: str = "root",
-    password: str = "",
-    database: str | None = None,
-    charset: str = connections.DEFAULT_CHARSET,
-    read_only: bool | None = None,
-    max_affected_rows: int | None = None,
-    description: str | None = None,
-    overwrite: bool = False,
-    verify: bool = False,
-) -> dict[str, Any]:
-    try:
-        fields = {
-            "host": host,
-            "port": port,
-            "user": user,
-            "password": password,
-            "database": database,
-            "charset": charset,
-            "read_only": read_only,
-            "max_affected_rows": max_affected_rows,
-            "description": description,
-        }
-        candidate = connections.normalize_profile(name, {k: v for k, v in fields.items() if v is not None})
-        if verify:
-            conn = _dial(_profile_connection_config(candidate))
-            _close_quietly(conn)
-        profile = connections.save_profile(name, fields, overwrite=overwrite)
-    except ProfileConflict as exc:
-        return _error_result(str(exc), code="CONNECTION_CONFLICT")
-    except ProfileError as exc:
-        return _error_result(str(exc), code="CONNECTION_INVALID")
-    except MySQLError as exc:
-        return _error_result(str(exc), code="CONNECTION_FAILED")
-    except OSError as exc:
-        return _error_result(
-            f"Failed to write {connections.connections_file()}: {exc}",
-            code="CONNECTIONS_FILE_ERROR",
-        )
-
-    payload: dict[str, Any] = {
-        "ok": True,
-        "saved": name,
-        "connection": {
-            key: value for key, value in profile.items() if key != "password"
-        },
-        "has_password": bool(profile.get("password")),
-        "connections_file": str(connections.connections_file()),
-    }
-    return payload
-
-
-@mcp.tool(description="Delete a saved connection profile by name.")
-def delete_connection(name: str) -> dict[str, Any]:
-    try:
-        removed = connections.delete_profile(name)
-    except ProfileError as exc:
-        return _error_result(str(exc), code="CONNECTION_INVALID")
-    except OSError as exc:
-        return _error_result(
-            f"Failed to write {connections.connections_file()}: {exc}",
-            code="CONNECTIONS_FILE_ERROR",
-        )
-
-    return {
-        "ok": True,
-        "deleted": name,
-        "connection": {
-            key: value for key, value in removed.items() if key != "password"
-        },
-        "connections_file": str(connections.connections_file()),
-    }
 
 
 def _streamable_http_path(value: str) -> str:
