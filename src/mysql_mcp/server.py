@@ -14,18 +14,17 @@ import os
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Annotated, Any
 
-import mysql.connector
 from mcp.server.mcpserver import MCPServer
 from mysql.connector import Error as MySQLError
 from pydantic import Field
 
-from . import connections
+from . import credentials as credential_config
 from .client import MySQLClient
-from .connections import ProfileConflict, ProfileError
-from .http_auth import BearerTokenMiddleware
+from .credentials import CredentialError
+from .http_auth import BearerTokenMiddleware, HealthEndpointMiddleware
 
 mcp = MCPServer("mysql-mcp")
 
@@ -85,24 +84,14 @@ _CONNECTION_DOC = (
     "The server uses it only for this call and never reads or writes saved profiles."
 )
 
-ConnectionName = Annotated[
-    str | None,
-    Field(
-        description=(
-            "Optional label for this one-shot call; it is not persisted or looked up."
-        )
-    ),
-]
-
 Credentials = Annotated[
-    dict[str, Any] | None,
+    dict[str, Any],
     Field(
         description=(
             "Complete login details for this operation. Shape: "
             '{"host": "10.0.0.5", "port": 3306, "user": "root", "password": "...", '
-            '"database": "mydb", "charset": "utf8mb4"} — `host` is the only required key. '
-            "Credentials are discarded after the operation and never loosen "
-            "read_only/max_affected_rows."
+            '"database": "mydb", "charset": "utf8mb4"} — `host` is required. '
+            "Credentials are discarded after the operation."
         )
     ),
 ]
@@ -110,124 +99,59 @@ Credentials = Annotated[
 
 @dataclass(frozen=True)
 class ConnectionInfo:
-    """Resolved connection: where it came from, the driver kwargs, and its policy."""
+    """Validated driver arguments and per-call safety policy."""
 
-    name: str
-    source: str
     config: dict[str, Any] = field(repr=False)
     read_only: bool = False
     max_affected_rows: int | None = None
     database: str | None = None
-    # Set for inline credentials: the profile to persist once dialling succeeded.
 
 
 class ReadOnlyConnectionError(ValueError):
-    """A write was attempted on a profile that is pinned read-only."""
+    """A write was attempted with read-only credentials."""
 
 
-def _profile_ssl_options(profile: dict[str, Any]) -> dict[str, Any]:
+def _credential_ssl_options(credential_values: dict[str, Any]) -> dict[str, Any]:
     options: dict[str, Any] = {}
     for key in ("ssl_ca", "ssl_cert", "ssl_key", "ssl_cipher"):
-        if profile.get(key):
-            options[key] = profile[key]
+        if credential_values.get(key):
+            options[key] = credential_values[key]
     for key in ("ssl_disabled", "ssl_verify_cert", "ssl_verify_identity"):
-        if key in profile:
-            options[key] = profile[key]
+        if key in credential_values:
+            options[key] = credential_values[key]
     return options
 
 
-def _profile_connection_config(profile: dict[str, Any]) -> dict[str, Any]:
+def _connection_config(credential_values: dict[str, Any]) -> dict[str, Any]:
     config: dict[str, Any] = {
-        "host": profile["host"],
-        "port": profile.get("port", connections.DEFAULT_PORT),
-        "user": profile.get("user", "root"),
-        "password": profile.get("password", ""),
-        "charset": profile.get("charset", connections.DEFAULT_CHARSET),
+        "host": credential_values["host"],
+        "port": credential_values.get("port", credential_config.DEFAULT_PORT),
+        "user": credential_values.get("user", "root"),
+        "password": credential_values.get("password", ""),
+        "charset": credential_values.get("charset", credential_config.DEFAULT_CHARSET),
         "autocommit": True,
     }
-    if profile.get("database"):
-        config["database"] = profile["database"]
-    config.update(_profile_ssl_options(profile))
+    if credential_values.get("database"):
+        config["database"] = credential_values["database"]
+    config.update(_credential_ssl_options(credential_values))
     return config
 
 
-def resolve_connection(connection: ConnectionName = None) -> ConnectionInfo:
-    """Turn a profile name into everything needed to dial and police it.
-
-    A name is mandatory: there is no environment-provided fallback, so an omitted
-    ``connection`` is an error rather than a silent dial at localhost:3306.
-    """
-    if connection is None:
-        raise ProfileError(
-            "A connection is required: pass connection=<name> to use a saved profile, "
-            "or connection=<name> plus credentials to use one that is not saved yet. "
-            f"{_saved_name_hint()}"
-        )
-
-    name, profile = connections.load_profile(connection)
-    config = _profile_connection_config(profile)
-    config["connection_timeout"] = DEFAULT_CONNECT_TIMEOUT
-    return ConnectionInfo(
-        name=name,
-        source="file",
-        config=config,
-        read_only=bool(profile.get("read_only", False)),
-        max_affected_rows=profile.get("max_affected_rows"),
-        database=config.get("database"),
-    )
-
-
-# Fields inline credentials may overwrite on an existing profile. Policy keys
-# (read_only, max_affected_rows) are deliberately absent: a login must never be
-# able to widen what a saved profile permits.
-_OVERLAY_KEYS = ("host", "port", "user", "password", "database", "charset")
-
-
-def _inline_fields(credentials: Any) -> dict[str, Any]:
-    if not isinstance(credentials, dict):
-        raise TypeError(
-            f"credentials must be an object of login fields, got {type(credentials).__name__}"
-        )
-    unknown = sorted(set(credentials) - connections.ALLOWED_KEYS)
-    if unknown:
-        raise ProfileError(
-            f"credentials has unknown keys: {', '.join(unknown)}. "
-            f"Allowed: {', '.join(sorted(connections.ALLOWED_KEYS))}"
-        )
-    if not credentials.get("host"):
-        raise ProfileError("credentials requires a 'host'")
-    return {key: value for key, value in credentials.items() if value is not None}
-
-
-def resolve_request(
-    connection: ConnectionName = None,
-    credentials: Credentials = None,
-) -> ConnectionInfo:
+def resolve_request(credentials: Credentials) -> ConnectionInfo:
     """Resolve one stateless tool call from credentials supplied by the caller.
 
-    Credentials are required for every call. The server never reads or writes a
-    saved connection profile for operational tools.
+    Credentials are required for every call and are used only for that call.
     """
-    if credentials is None:
-        raise ProfileError("credentials are required for every database operation")
-    fields = _inline_fields(credentials)
-    clean = connections.validate_name(connection) if connection else "one-shot"
-    profile = connections.normalize_profile(clean, fields)
+    credential_values = credential_config.normalize(credentials)
 
-    config = _profile_connection_config(profile)
+    config = _connection_config(credential_values)
     config["connection_timeout"] = DEFAULT_CONNECT_TIMEOUT
     return ConnectionInfo(
-        name=clean,
-        source="inline",
         config=config,
-        read_only=bool(profile.get("read_only", False)),
-        max_affected_rows=profile.get("max_affected_rows"),
+        read_only=bool(credential_values.get("read_only", False)),
+        max_affected_rows=credential_values.get("max_affected_rows"),
         database=config.get("database"),
     )
-
-
-def get_connection_config(connection: ConnectionName = None) -> dict[str, Any]:
-    return resolve_connection(connection).config
 
 
 def _dial(config: dict[str, Any]):
@@ -235,24 +159,18 @@ def _dial(config: dict[str, Any]):
     return MySQLClient(config).connect()
 
 
-def get_connection(connection: ConnectionName = None):
-    """Resolve and dial in one step, for callers that do not need the policy."""
-    return _dial(resolve_connection(connection).config)
-
-
 @contextmanager
 def _connection(
-    connection: ConnectionName = None,
-    credentials: Credentials = None,
+    credentials: Credentials,
     *,
     write_operation: str | None = None,
 ) -> Iterator[tuple[Any, ConnectionInfo]]:
-    """Resolve the profile, refuse writes on a read-only one, then dial.
+    """Validate credentials, refuse disallowed writes, then dial.
 
     The policy check deliberately runs before connecting, so a read-only request
     reports ``CONNECTION_READ_ONLY`` even when the host is unreachable.
     """
-    info = resolve_request(connection, credentials)
+    info = resolve_request(credentials)
     if write_operation is not None:
         _assert_writable(info, write_operation)
     conn = _dial(info.config)
@@ -268,16 +186,20 @@ def _close_quietly(conn: Any) -> None:
 
 
 def _connection_fields(info: ConnectionInfo) -> dict[str, Any]:
-    """Connection keys every tool reports, naming the profile that served the call."""
-    fields: dict[str, Any] = {"connection": info.name}
-    return fields
+    """Return a password-free description of the target used for this call."""
+    return {
+        "target": {
+            "host": info.config["host"],
+            "port": info.config["port"],
+            "database": info.database,
+        }
+    }
 
 
 def _require_database(info: ConnectionInfo) -> str:
     if not info.database:
         raise ValueError(
-            f"Connection {info.name!r} has no database selected. Use a profile that "
-            "sets 'database' (or pass inline credentials that include it)."
+            "credentials has no database selected; include the 'database' field"
         )
     return info.database
 
@@ -285,8 +207,7 @@ def _require_database(info: ConnectionInfo) -> str:
 def _assert_writable(info: ConnectionInfo, operation: str) -> None:
     if info.read_only:
         raise ReadOnlyConnectionError(
-            f"Connection {info.name!r} is pinned read-only, so {operation} is refused. "
-            "Remove 'read_only' from that profile (or use a different connection) to allow it."
+            f"credentials is read-only, so {operation} is refused"
         )
 
 
@@ -308,14 +229,11 @@ def _apply_query_timeout(conn: Any) -> None:
 
 @contextmanager
 def _read_connection(
-    connection: ConnectionName = None,
-    credentials: Credentials = None,
+    credentials: Credentials,
     *,
     write_operation: str | None = None,
 ) -> Iterator[tuple[Any, ConnectionInfo]]:
-    with _connection(
-        connection, credentials, write_operation=write_operation
-    ) as (
+    with _connection(credentials, write_operation=write_operation) as (
         conn,
         info,
     ):
@@ -682,11 +600,10 @@ def _mutation_cap_error(table: str, matched: int, cap: int) -> dict[str, Any]:
     )
 )
 def health_check(
-    connection: ConnectionName = None,
-    credentials: Credentials = None,
+    credentials: Credentials,
 ) -> dict[str, Any]:
     try:
-        with _read_connection(connection, credentials) as (conn, info):
+        with _read_connection(credentials) as (conn, info):
             cursor = conn.cursor(dictionary=True)
             cursor.execute(
                 "SELECT DATABASE() AS database_name, VERSION() AS server_version"
@@ -702,9 +619,7 @@ def health_check(
             }
     except MySQLError as exc:
         return _error_result(str(exc), code="CONNECTION_FAILED")
-    except ProfileConflict as exc:
-        return _error_result(str(exc), code="CONNECTION_CONFLICT")
-    except ProfileError as exc:
+    except CredentialError as exc:
         return _error_result(str(exc), code="CONNECTION_ERROR")
     except (ValueError, TypeError) as exc:
         return _error_result(str(exc), code="CONFIG_ERROR")
@@ -716,11 +631,10 @@ def health_check(
     )
 )
 def list_tables(
-    connection: ConnectionName = None,
-    credentials: Credentials = None,
+    credentials: Credentials,
 ) -> list[str] | dict[str, Any]:
     try:
-        with _connection(connection, credentials) as (conn, info):
+        with _connection(credentials) as (conn, info):
             _require_database(info)
             cursor = conn.cursor()
             cursor.execute("SHOW TABLES")
@@ -731,9 +645,7 @@ def list_tables(
             ]
     except MySQLError as exc:
         return _error_result(f"Failed to list tables: {exc}", code="QUERY_FAILED")
-    except ProfileConflict as exc:
-        return _error_result(str(exc), code="CONNECTION_CONFLICT")
-    except ProfileError as exc:
+    except CredentialError as exc:
         return _error_result(str(exc), code="CONNECTION_ERROR")
     except (ValueError, TypeError) as exc:
         return _error_result(str(exc), code="CONFIG_ERROR")
@@ -746,11 +658,10 @@ def list_tables(
     )
 )
 def get_databases(
-    connection: ConnectionName = None,
-    credentials: Credentials = None,
+    credentials: Credentials,
 ) -> list[str] | dict[str, Any]:
     try:
-        with _connection(connection, credentials) as (conn, _info):
+        with _connection(credentials) as (conn, _info):
             cursor = conn.cursor()
             cursor.execute("SHOW DATABASES")
             rows = cursor.fetchall()
@@ -760,9 +671,7 @@ def get_databases(
             ]
     except MySQLError as exc:
         return _error_result(f"Failed to list databases: {exc}", code="QUERY_FAILED")
-    except ProfileConflict as exc:
-        return _error_result(str(exc), code="CONNECTION_CONFLICT")
-    except ProfileError as exc:
+    except CredentialError as exc:
         return _error_result(str(exc), code="CONNECTION_ERROR")
     except (ValueError, TypeError) as exc:
         return _error_result(str(exc), code="CONFIG_ERROR")
@@ -778,12 +687,11 @@ def get_databases(
 )
 def fetch_table(
     table_name: str,
+    credentials: Credentials,
     limit: int = DEFAULT_QUERY_LIMIT,
     where: dict[str, Any] | list[dict[str, Any]] | None = None,
     order_by: str | list[str | dict[str, str]] | None = None,
     where_params: list[Any] | None = None,
-    connection: ConnectionName = None,
-    credentials: Credentials = None,
 ) -> dict[str, Any]:
     try:
         safe_table = _safe_identifier(table_name, "table_name")
@@ -803,7 +711,7 @@ def fetch_table(
         sql += " LIMIT %s"
         params.append(limit_value)
 
-        with _read_connection(connection, credentials) as (conn, info):
+        with _read_connection(credentials) as (conn, info):
             database = _require_database(info)
             cursor = conn.cursor(dictionary=True)
             cursor.execute(sql, params)
@@ -834,9 +742,7 @@ def fetch_table(
             table=table_name,
             code="QUERY_FAILED",
         )
-    except ProfileConflict as exc:
-        return _error_result(str(exc), code="CONNECTION_CONFLICT")
-    except ProfileError as exc:
+    except CredentialError as exc:
         return _error_result(str(exc), table_name=table_name, code="CONNECTION_ERROR")
     except (ValueError, TypeError) as exc:
         return _error_result(str(exc), table_name=table_name)
@@ -849,10 +755,9 @@ def fetch_table(
 )
 def count_rows(
     table_name: str,
+    credentials: Credentials,
     where: dict[str, Any] | list[dict[str, Any]] | None = None,
     where_params: list[Any] | None = None,
-    connection: ConnectionName = None,
-    credentials: Credentials = None,
 ) -> dict[str, Any]:
     try:
         safe_table = _safe_identifier(table_name, "table_name")
@@ -863,7 +768,7 @@ def count_rows(
             sql += f" WHERE {where_clause}"
             params.extend(where_bindings)
 
-        with _read_connection(connection, credentials) as (conn, info):
+        with _read_connection(credentials) as (conn, info):
             cursor = conn.cursor(dictionary=True)
             cursor.execute(sql, params)
             result = cursor.fetchone()
@@ -885,9 +790,7 @@ def count_rows(
             table=table_name,
             code="QUERY_FAILED",
         )
-    except ProfileConflict as exc:
-        return _error_result(str(exc), code="CONNECTION_CONFLICT")
-    except ProfileError as exc:
+    except CredentialError as exc:
         return _error_result(str(exc), table_name=table_name, code="CONNECTION_ERROR")
     except (ValueError, TypeError) as exc:
         return _error_result(str(exc), table_name=table_name)
@@ -901,8 +804,7 @@ def count_rows(
 def insert_row(
     table_name: str,
     row: dict[str, Any],
-    connection: ConnectionName = None,
-    credentials: Credentials = None,
+    credentials: Credentials,
 ) -> dict[str, Any]:
     try:
         if not isinstance(row, dict):
@@ -916,9 +818,7 @@ def insert_row(
         column_sql = ", ".join(f"`{column}`" for column in columns)
         sql = f"INSERT INTO `{safe_table}` ({column_sql}) VALUES ({placeholders})"
 
-        with _connection(
-            connection, credentials, write_operation="insert_row"
-        ) as (
+        with _connection(credentials, write_operation="insert_row") as (
             conn,
             info,
         ):
@@ -942,9 +842,7 @@ def insert_row(
         return _error_result(
             str(exc), table_name=table_name, code="CONNECTION_READ_ONLY"
         )
-    except ProfileConflict as exc:
-        return _error_result(str(exc), code="CONNECTION_CONFLICT")
-    except ProfileError as exc:
+    except CredentialError as exc:
         return _error_result(str(exc), table_name=table_name, code="CONNECTION_ERROR")
     except (ValueError, TypeError) as exc:
         return _error_result(str(exc), table_name=table_name)
@@ -960,10 +858,9 @@ def update_rows(
     table_name: str,
     updates: dict[str, Any],
     where: dict[str, Any] | list[dict[str, Any]],
+    credentials: Credentials,
     where_params: list[Any] | None = None,
     max_affected_rows: int = DEFAULT_MAX_MUTATION_ROWS,
-    connection: ConnectionName = None,
-    credentials: Credentials = None,
 ) -> dict[str, Any]:
     try:
         if not isinstance(updates, dict):
@@ -982,9 +879,7 @@ def update_rows(
         params = list(updates.values()) + where_bindings
         sql = f"UPDATE `{safe_table}` SET {set_clause} WHERE {where_clause}"
 
-        with _connection(
-            connection, credentials, write_operation="update_rows"
-        ) as (
+        with _connection(credentials, write_operation="update_rows") as (
             conn,
             info,
         ):
@@ -1015,9 +910,7 @@ def update_rows(
         return _error_result(
             str(exc), table_name=table_name, code="CONNECTION_READ_ONLY"
         )
-    except ProfileConflict as exc:
-        return _error_result(str(exc), code="CONNECTION_CONFLICT")
-    except ProfileError as exc:
+    except CredentialError as exc:
         return _error_result(str(exc), table_name=table_name, code="CONNECTION_ERROR")
     except (ValueError, TypeError) as exc:
         return _error_result(str(exc), table_name=table_name)
@@ -1032,10 +925,9 @@ def update_rows(
 def delete_rows(
     table_name: str,
     where: dict[str, Any] | list[dict[str, Any]],
+    credentials: Credentials,
     where_params: list[Any] | None = None,
     max_affected_rows: int = DEFAULT_MAX_MUTATION_ROWS,
-    connection: ConnectionName = None,
-    credentials: Credentials = None,
 ) -> dict[str, Any]:
     try:
         if not where:
@@ -1045,9 +937,7 @@ def delete_rows(
         where_clause, where_bindings = _build_where_clause(where, where_params)
         sql = f"DELETE FROM `{safe_table}` WHERE {where_clause}"
 
-        with _connection(
-            connection, credentials, write_operation="delete_rows"
-        ) as (
+        with _connection(credentials, write_operation="delete_rows") as (
             conn,
             info,
         ):
@@ -1078,9 +968,7 @@ def delete_rows(
         return _error_result(
             str(exc), table_name=table_name, code="CONNECTION_READ_ONLY"
         )
-    except ProfileConflict as exc:
-        return _error_result(str(exc), code="CONNECTION_CONFLICT")
-    except ProfileError as exc:
+    except CredentialError as exc:
         return _error_result(str(exc), table_name=table_name, code="CONNECTION_ERROR")
     except (ValueError, TypeError) as exc:
         return _error_result(str(exc), table_name=table_name)
@@ -1094,12 +982,11 @@ def delete_rows(
 )
 def describe_table(
     table_name: str,
-    connection: ConnectionName = None,
-    credentials: Credentials = None,
+    credentials: Credentials,
 ) -> list[dict[str, Any]] | dict[str, Any]:
     try:
         safe_table = _safe_identifier(table_name, "table_name")
-        with _read_connection(connection, credentials) as (conn, info):
+        with _read_connection(credentials) as (conn, info):
             database = _require_database(info)
             cursor = conn.cursor(dictionary=True)
             cursor.execute(
@@ -1129,9 +1016,7 @@ def describe_table(
             table=table_name,
             code="QUERY_FAILED",
         )
-    except ProfileConflict as exc:
-        return _error_result(str(exc), code="CONNECTION_CONFLICT")
-    except ProfileError as exc:
+    except CredentialError as exc:
         return _error_result(str(exc), table_name=table_name, code="CONNECTION_ERROR")
     except (ValueError, TypeError) as exc:
         return _error_result(str(exc), table_name=table_name)
@@ -1148,10 +1033,9 @@ def describe_table(
 )
 def execute_query(
     sql: str,
+    credentials: Credentials,
     limit: int = DEFAULT_QUERY_LIMIT,
     read_only: bool = True,
-    connection: ConnectionName = None,
-    credentials: Credentials = None,
 ) -> dict[str, Any]:
     try:
         statement = _strip_trailing_semicolon(sql)
@@ -1166,7 +1050,6 @@ def execute_query(
 
         write_operation = None if read_only else "execute_query(read_only=false)"
         with _read_connection(
-            connection,
             credentials,
             write_operation=write_operation,
         ) as (
@@ -1207,33 +1090,10 @@ def execute_query(
         )
     except ReadOnlyConnectionError as exc:
         return _error_result(str(exc), sql=sql, code="CONNECTION_READ_ONLY")
-    except ProfileConflict as exc:
-        return _error_result(str(exc), code="CONNECTION_CONFLICT")
-    except ProfileError as exc:
+    except CredentialError as exc:
         return _error_result(str(exc), sql=sql, code="CONNECTION_ERROR")
     except (ValueError, TypeError) as exc:
         return _error_result(str(exc), sql=sql)
-
-
-def execute_sql(
-    sql: str,
-    limit: int = DEFAULT_QUERY_LIMIT,
-    read_only: bool = True,
-    connection: ConnectionName = None,
-    credentials: Credentials = None,
-) -> dict[str, Any]:
-    """Deprecated alias for :func:`execute_query`.
-
-    Deliberately *not* registered as an MCP tool: exposing the same operation
-    twice only burns model context and invites the wrong pick.
-    """
-    return execute_query(
-        sql=sql,
-        limit=limit,
-        read_only=read_only,
-        connection=connection,
-        credentials=credentials,
-    )
 
 
 def _streamable_http_path(value: str) -> str:
@@ -1291,36 +1151,42 @@ def main(argv: list[str] | None = None) -> None:
         mcp.run(transport="stdio")
         return
 
-    if not args.auth_token:
-        mcp.run(
-            transport="streamable-http",
-            host=args.host,
-            port=args.port,
-            streamable_http_path=args.path,
-            json_response=args.json_response,
-            stateless_http=args.stateless_http,
-        )
-        return
+    _run_http(args)
 
-    import anyio
+
+def create_http_app(
+    *,
+    host: str,
+    path: str,
+    json_response: bool,
+    stateless_http: bool,
+    token: str | None,
+):
+    app = mcp.streamable_http_app(
+        streamable_http_path=path,
+        json_response=json_response,
+        stateless_http=stateless_http,
+        host=host,
+    )
+    app = HealthEndpointMiddleware(app)
+    return BearerTokenMiddleware(app, token) if token else app
+
+
+def _run_http(args: argparse.Namespace) -> None:
     import uvicorn
 
-    async def serve() -> None:
-        app = mcp.streamable_http_app(
-            streamable_http_path=args.path,
+    uvicorn.run(
+        create_http_app(
+            host=args.host,
+            path=args.path,
             json_response=args.json_response,
             stateless_http=args.stateless_http,
-            host=args.host,
-        )
-        config = uvicorn.Config(
-            BearerTokenMiddleware(app, args.auth_token),
-            host=args.host,
-            port=args.port,
-            log_level=mcp.settings.log_level.lower(),
-        )
-        await uvicorn.Server(config).serve()
-
-    anyio.run(serve)
+            token=args.auth_token,
+        ),
+        host=args.host,
+        port=args.port,
+        log_level=mcp.settings.log_level.lower(),
+    )
 
 
 if __name__ == "__main__":

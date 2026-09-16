@@ -1,6 +1,6 @@
 """Low-level MySQL transport helpers.
 
-This module deliberately knows nothing about MCP tools, connection profiles, or
+This module deliberately knows nothing about MCP tools or credential storage;
 tool policies.  It is the database equivalent of ``ssh_mcp.server.RemoteClient``:
 the MCP layer decides *what* is allowed, while this module only opens, configures,
 and closes a MySQL connection.
@@ -59,9 +59,4 @@ class MySQLClient:
             pass
 
 
-def connect(config: dict[str, Any]) -> Any:
-    """Compatibility seam for callers/tests that only need a raw connection."""
-    return MySQLClient(config).connect()
-
-
-__all__ = ["MySQLClient", "MySQLError", "connect"]
+__all__ = ["MySQLClient", "MySQLError"]

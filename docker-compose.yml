@@ -1,3 +1,5 @@
+name: mysql-mcp
+
 services:
   mysql-mcp:
     build: .
@@ -5,8 +7,14 @@ services:
     container_name: mysql-mcp
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8002:8000"
     environment:
-      - MYSQL_MCP_AUTH_TOKEN
+      MYSQL_MCP_AUTH_TOKEN: ${MYSQL_MCP_AUTH_TOKEN:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     # The default binds only to localhost on the host. Put an authenticated
     # TLS reverse proxy in front if another machine needs to reach this service.

@@ -1,41 +1,27 @@
-"""Shared fixtures.
-
-``isolated_connections_file`` guarantees no test ever reads or writes the real
-``~/.mysql-mcp/connections.json``; ``demo_profile`` stores a known-good profile
-so the tool tests can address a connection by name, which is now the only way in.
-"""
+"""Shared stateless MySQL test fixtures."""
 
 from __future__ import annotations
 
 import pytest
 from helpers import FakeConnection, FakeCursor
 
-from mysql_mcp import connections, server
-
-
-@pytest.fixture(autouse=True)
-def isolated_connections_file(monkeypatch, tmp_path):
-    path = tmp_path / "connections.json"
-    monkeypatch.setenv("MYSQL_CONNECTIONS_FILE", str(path))
-    yield path
+from mysql_mcp import server
 
 
 @pytest.fixture
-def demo_profile(isolated_connections_file):
-    """Save a profile called ``demo`` and return its name."""
-
-    def factory(name="demo", **overrides):
-        fields = {"host": "demo-host", "database": "demo"}
-        fields.update(overrides)
-        connections.save_profile(name, fields)
-        return name
-
-    return factory
+def credentials():
+    return {
+        "host": "demo-host",
+        "port": 3306,
+        "user": "reader",
+        "password": "secret",
+        "database": "demo",
+    }
 
 
 @pytest.fixture
 def fake_db(monkeypatch):
-    """Patch the connection seam with a scripted cursor and return that cursor."""
+    """Patch the only connection seam with a scripted fake database."""
 
     def factory(responses=None, database="demo"):
         cursor = FakeCursor(list(responses or []))

@@ -43,8 +43,12 @@ docker compose logs -f mysql-mcp
 docker compose down
 ```
 
-镜像名为 `sundonglai/mysql-mcp:latest`，容器名为 `mysql-mcp`。默认监听
-`127.0.0.1:8000`。服务不保存连接档案，数据库凭据由每次调用提供。
+镜像名为 `sundonglai/mysql-mcp:latest`，容器名为 `mysql-mcp`。宿主机默认地址为
+`http://127.0.0.1:8002/mcp`，容器内仍监听 8000；这样可以与 contracts 和 Office
+服务同机运行。健康检查地址为 `http://127.0.0.1:8002/health`。
+
+服务没有连接档案、remember 或兼容接口。数据库凭据必须由每次工具调用提供，
+连接关闭后立即丢弃。
 
 ## 连接数据库
 
@@ -82,7 +86,7 @@ list_tables(credentials={
 - 结构化更新和删除默认最多影响 1000 行，硬上限 10000 行。
 - `read_only=true` 的连接拒绝写操作。
 - `execute_query(read_only=false)` 仍是高权限通道，真正的权限控制应使用 MySQL 账号权限。
-- HTTP 模式默认只绑定回环地址；远程部署必须增加认证和 HTTPS。
+- Docker 默认只绑定回环地址。可信内网开放端口时至少设置 Token；跨不可信网络再增加 HTTPS。
 
 ## 项目结构
 
@@ -91,7 +95,7 @@ src/mysql_mcp/
 ├── mcp_server.py   # MCP transport 入口
 ├── server.py       # 工具和 SQL 策略
 ├── client.py       # MySQL 连接生命周期
-└── connections.py  # 连接参数校验和 TLS 配置
+└── credentials.py  # 单次凭据校验和 TLS 配置（无文件读写）
 ```
 
 ## 开发
