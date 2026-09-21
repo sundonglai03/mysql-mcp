@@ -43,9 +43,9 @@ docker compose logs -f mysql-mcp
 docker compose down
 ```
 
-镜像名为 `sundonglai/mysql-mcp:latest`，容器名为 `mysql-mcp`。宿主机默认地址为
-`http://127.0.0.1:8002/mcp`，容器内仍监听 8000；这样可以与 contracts 和 Office
-服务同机运行。
+镜像名为 `sundonglai/mysql-mcp:latest`，容器名为 `mysql-mcp`。Compose 默认监听宿主机
+所有网卡的 `8002`（容器内仍是 8000），局域网内用 `http://<宿主机IP>:8002/mcp` 访问；
+这样可以与 contracts 和 Office 服务同机运行。
 
 服务没有连接档案、remember 或兼容接口。数据库凭据必须由每次工具调用提供，
 连接关闭后立即丢弃。

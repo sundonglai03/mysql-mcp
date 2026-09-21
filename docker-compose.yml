@@ -7,8 +7,8 @@ services:
     container_name: mysql-mcp
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8002:8000"
+      # 局域网内使用：直接监听宿主机所有网卡（容器内仍是 8000）。
+      # 认证由 MYSQL_MCP_AUTH_TOKEN 控制；跨不可信网络访问请前置带认证的反向代理。
+      - "0.0.0.0:8002:8000"
     environment:
       MYSQL_MCP_AUTH_TOKEN: ${MYSQL_MCP_AUTH_TOKEN:-}
-    # The default binds only to localhost on the host. Put an authenticated
-    # TLS reverse proxy in front if another machine needs to reach this service.
