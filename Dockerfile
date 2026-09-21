@@ -6,21 +6,19 @@ RUN pip install --no-cache-dir "uv==$UV_VERSION"
 WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
-    PATH="/app/.venv/bin:$PATH" \
-    UV_CACHE_DIR=/app/.cache/uv
+    PATH="/app/.venv/bin:$PATH"
 
-# 依赖缓存挂在当前目录下的 /app/.cache/uv（见上面的 UV_CACHE_DIR）：
-# 依赖层重建时不会回 PyPI 重下。
+# cache mount 把 uv 的下载缓存（约定路径 /root/.cache/uv）挂到宿主机构建缓存上：
+# 依赖层重建时不会回 PyPI 重下，缓存本身不进镜像层。
 COPY pyproject.toml uv.lock README.md LICENSE ./
-RUN --mount=type=cache,target=/app/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
 
 COPY src ./src
-RUN --mount=type=cache,target=/app/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
-# 用户与属主单独一层：此时缓存挂载已释放，chown 不会连 /app/.cache 里的
-# 缓存文件一起扫（否则每次构建都要多走一遍几百 MB 的目录树）。
+# 用户与属主单独一层：与依赖安装解耦，改 uid 或加用户不会连带重装依赖。
 RUN useradd --create-home --uid 1000 mysql-mcp \
     && chown -R mysql-mcp:mysql-mcp /app
 
