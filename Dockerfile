@@ -8,15 +8,15 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     PATH="/app/.venv/bin:$PATH"
 
-# cache mount 把 uv 的下载缓存（约定路径 /root/.cache/uv）挂到宿主机构建缓存上：
-# 依赖层重建时不会回 PyPI 重下，缓存本身不进镜像层。
+# 先只 COPY 锁文件装依赖：uv.lock / pyproject.toml 不变时，改源码不会触发重装。
+# 构建机装了 buildx（Docker 23+ 自带，或 docker-buildx-plugin）后，可以给这两条
+# RUN 加上 --mount=type=cache,target=/root/.cache/uv，让锁文件变更后的重装也复用
+# 宿主机的 uv 缓存。
 COPY pyproject.toml uv.lock README.md LICENSE ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --no-install-project
 
 COPY src ./src
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev
 
 # 用户与属主单独一层：与依赖安装解耦，改 uid 或加用户不会连带重装依赖。
 RUN useradd --create-home --uid 1000 mysql-mcp \
